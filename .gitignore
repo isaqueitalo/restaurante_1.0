@@ -1,0 +1,45 @@
+<<<<<<< ours
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+.build/
+
+# Environments
+.venv/
+.env
+.env.*
+venv/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.cache/
+
+# Local data directory (SQLite gerada em tempo de execução)
+data/
+
+# Local databases and binaries
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.bak
+*.log
+
+# IDE/editor
+.vscode/
+.idea/
+.DS_Store
+=======
+__pycache__/
+*.pyc
+>>>>>>> theirs

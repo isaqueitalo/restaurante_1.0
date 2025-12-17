@@ -1,0 +1,17 @@
+* text=auto
+
+# Force text normalization for documentation and code
+*.py text diff
+*.md text diff
+*.txt text diff
+
+# Treat SQLite and other binary artifacts as binary with no diffs
+*.db binary -diff
+*.db-shm binary -diff
+*.db-wal binary -diff
+*.sqlite binary -diff
+*.sqlite3 binary -diff
+*.sqlite-wal binary -diff
+*.sqlite-shm binary -diff
+*.bak binary -diff
+*.log binary -diff
