@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Dict, Optional
 
-from models import Caixa, MovimentoCaixa, StatusCaixa, TipoMovimento
+from models import Caixa, DescontoLog, MovimentoCaixa, StatusCaixa, TipoMovimento
 from services.database import MemoryDB
 
 
@@ -168,6 +168,16 @@ class CaixaService:
         caixa.status = StatusCaixa.FECHADO
         caixa.usuario_fechamento_id = usuario_fechamento_id or self.usuario
         caixa.data_hora_fechamento = datetime.now()
+        self.db.log(
+            "fechar_caixa",
+            (
+                "Caixa {cid} fechado | esperado R$ {esp:.2f} | "
+                "contado R$ {cont:.2f} | dif {dif:+.2f}"
+            ).format(
+                cid=caixa.id, esp=esperado, cont=valor_contado_dinheiro_fechamento, dif=caixa.diferenca_dinheiro
+            ),
+            self.usuario,
+        )
         self._persist()
         return caixa
 
@@ -201,25 +211,49 @@ class CaixaService:
                 sangrias += mov.valor
         return {"suprimentos": suprimentos, "sangrias": sangrias}
 
+    def _total_descontos_do_periodo(self, caixa: Caixa) -> float:
+        """Soma descontos aplicados durante o período do caixa."""
+
+        inicio = caixa.data_hora_abertura
+        fim = caixa.data_hora_fechamento or datetime.now()
+        total = 0.0
+        for log in self.db.descontos_log:
+            if isinstance(log, DescontoLog) and log.criado_em:
+                if inicio <= log.criado_em <= fim:
+                    total += log.valor
+        return total
+
     def _resumo_caixa(self, caixa: Caixa) -> Dict[str, float]:
-        esperado = self.calcular_saldo_dinheiro(caixa.id)
+        esperado_registrado = caixa.valor_esperado_dinheiro_fechamento
+        esperado = esperado_registrado if esperado_registrado is not None else self.calcular_saldo_dinheiro(caixa.id)
         totais_pagamento = self.totais_por_pagamento(caixa.id)
         extras = self.totais_extras(caixa.id)
-        total_descontos = sum(log.valor for log in self.db.descontos_log)
+        total_descontos = self._total_descontos_do_periodo(caixa)
         impactos = [m.valor_dinheiro_impacto for m in self.db.movimentos_caixa if m.caixa_id == caixa.id]
         total_positivo = sum(v for v in impactos if v > 0)
         total_negativo = sum(v for v in impactos if v < 0)
-        valor_contado = caixa.valor_contado_dinheiro_fechamento or 0.0
-        diferenca = valor_contado - esperado if caixa.status == StatusCaixa.FECHADO else None
+        # valor contado pode estar ausente em caixas antigos; nesse caso, reconstrói
+        if caixa.valor_contado_dinheiro_fechamento is not None:
+            valor_contado = caixa.valor_contado_dinheiro_fechamento
+        else:
+            # tenta derivar a partir de esperado + diferença (se existir), ou assume esperado
+            delta = caixa.diferenca_dinheiro if caixa.diferenca_dinheiro is not None else 0.0
+            base = caixa.valor_esperado_dinheiro_fechamento if caixa.valor_esperado_dinheiro_fechamento is not None else esperado
+            valor_contado = base + delta
+
+        # calcula diferença sempre que houver base para comparação
+        if caixa.status == StatusCaixa.FECHADO or caixa.valor_contado_dinheiro_fechamento is not None or caixa.diferenca_dinheiro is not None:
+            diferenca = valor_contado - esperado
+        else:
+            diferenca = None
         return {
             "caixa_id": caixa.id,
             "abertura": caixa.data_hora_abertura,
             "fechamento": caixa.data_hora_fechamento,
             "valor_inicial": caixa.valor_inicial_dinheiro,
             "esperado_dinheiro": esperado,
-            "caixa_id": caixa.id,
-            "abertura": caixa.data_hora_abertura,
-            "fechamento": caixa.data_hora_fechamento,
+            "valor_contado": valor_contado,
+            "diferenca": diferenca,
             "pagamentos": totais_pagamento,
             "suprimentos": extras["suprimentos"],
             "sangrias": extras["sangrias"],
@@ -227,7 +261,7 @@ class CaixaService:
             "total_movimentos_positivos": total_positivo,
             "total_movimentos_negativos": total_negativo,
         }
-    
+
     def resumo_fechamento(self, caixa_id: int) -> Dict[str, float]:
         caixa = self._caixa_por_id(caixa_id)
         return self._resumo_caixa(caixa)

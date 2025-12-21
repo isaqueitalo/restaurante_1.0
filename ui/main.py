@@ -12,8 +12,6 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox, simpledialog
 from tkinter import ttk, scrolledtext
-from typing import Type
-from importlib import import_module
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
@@ -22,38 +20,10 @@ if str(ROOT_DIR) not in sys.path:
 from models import Produto
 
 
-def _resolver_caixa_service():
-    """Garante que CaixaService seja importável mesmo em execução direta."""
-
-    for mod_name in ("services.caixa_service", "ui.services.caixa_service"):
-        try:
-            mod = import_module(mod_name)
-            return mod.CaixaService, mod.CaixaError
-        except ImportError:
-            continue
-    raise ImportError("Não foi possível carregar CaixaService; verifique o PYTHONPATH")
-
-
-CaixaService, CaixaError = _resolver_caixa_service()
+from services.caixa_service import CaixaService, CaixaError
 
 from services.database import MemoryDB, SQLiteDB
 from services.pdv_service import PdvService
-
-
-def _resolver_pdv_app() -> Type[tk.Frame]:
-    """Permite importar o PDV tanto como módulo quanto via execução direta."""
-
-    for mod_name in ("ui.pdv", "pdv"):
-        try:
-            mod = import_module(mod_name)
-            return mod.PdvApp
-        except ImportError:
-            continue
-    raise ImportError("Não foi possível carregar PdvApp; verifique o PYTHONPATH")
-
-
-PdvApp = _resolver_pdv_app()
-
 
 class MainMenu:
     """Menu principal com atalhos para módulos do sistema."""
@@ -99,7 +69,19 @@ class MainMenu:
     def _abrir_pdv(self) -> None:
         janela = tk.Toplevel(self.master)
         janela.title("PDV")
-        PdvApp(janela, service=self.service, db=self.db)
+        try:
+            import importlib
+            import sys as _sys
+
+            # evita reuso de módulo parcialmente inicializado
+            _sys.modules.pop("ui.pdv", None)
+            pdv_mod = importlib.import_module("ui.pdv")
+            pdv_cls = getattr(pdv_mod, "PdvApp")
+        except Exception as exc:
+            messagebox.showerror("PDV", f"Não foi possível abrir o PDV:\n{exc}")
+            janela.destroy()
+            return
+        pdv_cls(janela, service=self.service, db=self.db)
 
     def _abrir_relatorios(self) -> None:
         janela = tk.Toplevel(self.master)
@@ -114,17 +96,18 @@ class MainMenu:
     def _abrir_cadastro(self) -> None:
         janela = tk.Toplevel(self.master)
         janela.title("Cadastro de Produtos")
-        CadastroProdutos(janela, self.db.produtos)
+        CadastroProdutos(janela, self.db)
 
 
 class CadastroProdutos:
     """Janela para gerenciar produtos em memória."""
 
-    def __init__(self, master: tk.Toplevel, produtos: dict[str, Produto]):
+    def __init__(self, master: tk.Toplevel, db: MemoryDB):
         from models import Produto
 
         self.master = master
-        self.produtos = produtos
+        self.db = db
+        self.produtos = db.produtos
 
         self._construir_layout()
         self._popular_lista()
@@ -133,8 +116,8 @@ class CadastroProdutos:
         form = tk.Frame(self.master)
         form.pack(padx=12, pady=12, fill="x")
 
-        tk.Label(form, text="Código").grid(row=0, column=0, sticky="w")
-        self.codigo_entry = tk.Entry(form, width=10)
+        tk.Label(form, text="Código (auto)").grid(row=0, column=0, sticky="w")
+        self.codigo_entry = tk.Entry(form, width=10, state="readonly")
         self.codigo_entry.grid(row=1, column=0, padx=(0, 8))
 
         tk.Label(form, text="Descrição").grid(row=0, column=1, sticky="w")
@@ -157,6 +140,7 @@ class CadastroProdutos:
         self.lista = tk.Listbox(self.master, width=80)
         self.lista.pack(padx=12, pady=(0, 12))
         self.lista.bind("<<ListboxSelect>>", lambda _e: self._preencher_form())
+        self._definir_codigo_display("auto")
 
     def _popular_lista(self) -> None:
         self.lista.delete(0, tk.END)
@@ -168,13 +152,12 @@ class CadastroProdutos:
             )
 
     def _salvar(self) -> None:
-        codigo = self.codigo_entry.get().strip()
         descricao = self.descricao_entry.get().strip()
         preco_texto = self.preco_entry.get().replace(",", ".")
         por_quilo = self.por_quilo_var.get()
 
-        if not codigo or not descricao:
-            messagebox.showwarning("Campos obrigatórios", "Informe código e descrição do produto.")
+        if not descricao:
+            messagebox.showwarning("Campos obrigatórios", "Informe a descrição do produto.")
             return
 
         try:
@@ -185,7 +168,12 @@ class CadastroProdutos:
 
         from models import Produto
 
+        codigo = self._proximo_codigo()
+        while codigo in self.produtos:
+            codigo = self._proximo_codigo()
+
         self.produtos[codigo] = Produto(codigo=codigo, descricao=descricao, preco=preco, por_quilo=por_quilo)
+        self.db.persist()
         self._popular_lista()
 
         self._limpar_form()
@@ -197,8 +185,7 @@ class CadastroProdutos:
         produto = self.produtos.get(codigo)
         if not produto:
             return
-        self.codigo_entry.delete(0, tk.END)
-        self.codigo_entry.insert(0, produto.codigo)
+        self._definir_codigo_display(produto.codigo)
         self.descricao_entry.delete(0, tk.END)
         self.descricao_entry.insert(0, produto.descricao)
         self.preco_entry.delete(0, tk.END)
@@ -210,29 +197,26 @@ class CadastroProdutos:
         if not codigo:
             messagebox.showinfo("Selecione", "Escolha um produto para editar.")
             return
-        novo_codigo = self.codigo_entry.get().strip()
         descricao = self.descricao_entry.get().strip()
         preco_texto = self.preco_entry.get().replace(",", ".")
         por_quilo = self.por_quilo_var.get()
-        if not novo_codigo or not descricao:
-            messagebox.showwarning("Campos obrigatórios", "Informe código e descrição.")
+        if not descricao:
+            messagebox.showwarning("Campos obrigatórios", "Informe a descrição.")
             return
         try:
             preco = float(preco_texto)
         except ValueError:
             messagebox.showerror("Preço inválido", "Use apenas números para o preço.")
             return
-        if novo_codigo != codigo and novo_codigo in self.produtos:
-            messagebox.showerror("Código duplicado", "Já existe produto com esse código.")
-            return
-        produto_antigo = self.produtos.pop(codigo)
-        self.produtos[novo_codigo] = Produto(
-            codigo=novo_codigo,
+        produto_antigo = self.produtos[codigo]
+        self.produtos[codigo] = Produto(
+            codigo=codigo,
             descricao=descricao,
             preco=preco,
             por_quilo=por_quilo,
             estoque=produto_antigo.estoque,
         )
+        self.db.persist()
         self._popular_lista()
         self._limpar_form()
 
@@ -243,6 +227,7 @@ class CadastroProdutos:
             return
         if messagebox.askyesno("Confirmar", f"Apagar produto {codigo}?"):
             self.produtos.pop(codigo, None)
+            self.db.persist()
             self._popular_lista()
             self._limpar_form()
 
@@ -255,11 +240,20 @@ class CadastroProdutos:
 
     def _limpar_form(self) -> None:
         self.lista.selection_clear(0, tk.END)
-        self.codigo_entry.delete(0, tk.END)
         self.descricao_entry.delete(0, tk.END)
         self.preco_entry.delete(0, tk.END)
         self.por_quilo_var.set(False)
+        self._definir_codigo_display("auto")
         self.codigo_entry.focus_set()
+
+    def _definir_codigo_display(self, codigo: str) -> None:
+        self.codigo_entry.configure(state="normal")
+        self.codigo_entry.delete(0, tk.END)
+        self.codigo_entry.insert(0, codigo)
+        self.codigo_entry.configure(state="readonly")
+
+    def _proximo_codigo(self) -> str:
+        return str(self.db.next_id())
 
 
 class RelatoriosWindow:
@@ -478,23 +472,21 @@ class CaixaControleWindow:
         inicial = resumo.get("valor_inicial", 0.0)
         entradas = resumo.get("total_movimentos_positivos", 0.0)
         saidas = abs(resumo.get("total_movimentos_negativos", 0.0))
+        fluxo_liquido = entradas - saidas
         esperado = resumo.get("esperado_dinheiro", 0.0)
         contado = resumo.get("valor_contado", 0.0)
         diferenca = resumo.get("diferenca", 0.0)
+        status_diff = "SOBRA" if diferenca > 0 else "FALTA" if diferenca < 0 else "OK"
 
-        linhas_cash_header = " | ".join(
-            f"{titulo:^12}" for titulo in ["Inicial", "Entradas (+)", "Saídas (-)", "Esperado", "Contado", "Diferença"]
-        )
-        linhas_cash_valores = " | ".join(
-            [
-                f"R$ {inicial:>8.2f}",
-                f"R$ {entradas:>8.2f}",
-                f"R$ {saidas:>8.2f}",
-                f"R$ {esperado:>8.2f}",
-                f"R$ {contado:>8.2f}",
-                f"R$ {diferenca:>8.2f}",
-            ]
-        )
+        formula = [
+            "Cálculo do esperado (ajuda de conferência)",
+            f"  Inicial..............: R$ {inicial:>10.2f}",
+            f"+ Entradas (+).........: R$ {entradas:>10.2f}",
+            f"- Saídas (-)...........: R$ {saidas:>10.2f}",
+            f"= Esperado em dinheiro : R$ {esperado:>10.2f}",
+            f"  Contado em dinheiro  : R$ {contado:>10.2f}",
+            f"  Diferença (+/-)......: R$ {diferenca:>10.2f} ({status_diff})",
+        ]
 
         linhas = [
             f"CAIXA {resumo.get('caixa_id')} - FECHAMENTO",
@@ -502,17 +494,23 @@ class CaixaControleWindow:
             f"Fechamento: {resumo.get('fechamento')}",
             "" + "-" * 70,
             "Movimentos em dinheiro (impacto na gaveta)",
-            linhas_cash_header,
-            "-" * len(linhas_cash_header),
-            linhas_cash_valores,
+            f"  Inicial..............: R$ {inicial:>10.2f}",
+            f"  Entradas (+).........: R$ {entradas:>10.2f}",
+            f"  Saídas (-)...........: R$ {saidas:>10.2f}",
+            f"  Saldo parcial........: R$ {(inicial + fluxo_liquido):>10.2f}",
+            f"  Esperado em dinheiro : R$ {esperado:>10.2f}",
+            f"  Contado em dinheiro  : R$ {contado:>10.2f}",
+            f"  Diferença (+/-)......: R$ {diferenca:>10.2f} ({status_diff})",
+            "",
+            *formula,
             "",
             "Totais por pagamento",
             *linhas_pagamento,
             "",
             "Outros totais",
-            f"Descontos     : R$ {resumo.get('descontos', 0.0):>10.2f}",
-            f"Suprimentos   : R$ {resumo.get('suprimentos', 0.0):>10.2f}",
-            f"Sangrias      : R$ {resumo.get('sangrias', 0.0):>10.2f}",
+            f"  Descontos............: R$ {resumo.get('descontos', 0.0):>10.2f}",
+            f"  Suprimentos..........: R$ {resumo.get('suprimentos', 0.0):>10.2f}",
+            f"  Sangrias.............: R$ {resumo.get('sangrias', 0.0):>10.2f}",
         ]
         return "\n".join(linhas)
 

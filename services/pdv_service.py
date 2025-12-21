@@ -16,6 +16,7 @@ from models import (
     PerdaEstoque,
     MovimentoCaixa,
     Produto,
+    StatusCaixa,
     StatusComanda,
     TipoMovimento,
 )
@@ -238,6 +239,7 @@ class PdvService:
         esperado = caixa.valor_inicial_dinheiro + saldo_movimentos
         caixa.valor_esperado_dinheiro_fechamento = esperado
         caixa.diferenca_dinheiro = contagem_final - esperado
+        caixa.status = StatusCaixa.FECHADO
         self.db.log("fechar_caixa", f"Caixa {caixa_id} fechado", self.usuario)
         self._persist()
         return caixa
