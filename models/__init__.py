@@ -15,6 +15,7 @@ from .entities import (
     StatusCaixa,
     StatusComanda,
     TipoMovimento,
+    User,
 )
 
 __all__ = [
@@ -32,4 +33,5 @@ __all__ = [
     "StatusCaixa",
     "StatusComanda",
     "TipoMovimento",
+    User,
 ]

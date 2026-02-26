@@ -2,11 +2,12 @@ from enum import Enum
 
 
 class UserRole(str, Enum):
-    ADMIN = "admin"
-    GERENTE = "gerente"
-    CAIXA = "caixa"
-    GARCOM = "garcom"
-
+    ADMIN = "ADMIN"
+    USER = "USER"
+    GERENTE = "GERENTE"
+    CAIXA = "CAIXA"
+    GARCOM = "GARCOM"
+    
 
 class CategoriaProduto(str, Enum):
     PRATO_FIXO = "PRATO_FIXO"

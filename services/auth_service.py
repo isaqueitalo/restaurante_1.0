@@ -8,7 +8,9 @@ from services import logging_service
 
 def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
-
+    
+def verify_password(password: str, password_hash: str) -> bool:
+    return hash_password(password) == password_hash
 
 def create_user(username: str, password: str, role: UserRole, actor: str) -> int:
     conn = get_connection()

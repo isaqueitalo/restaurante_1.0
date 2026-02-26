@@ -12,18 +12,70 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox, simpledialog
 from tkinter import ttk, scrolledtext
+from models.enums import UserRole
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from models import Produto
+# Compatibilidade para ambientes onde ``User`` não esteja exportado em
+# ``models.__init__`` (ex.: cópias desatualizadas). O fallback importa
+# diretamente do módulo de entidades para evitar erro de importação.
+try:  # pragma: no cover - caminho alternativo para instalações antigas
+    from models import Produto, User
+except ImportError:  # pragma: no cover
+    from models.entities import Produto, User
 
 
+from models.enums import UserRole
 from services.caixa_service import CaixaService, CaixaError
 
 from services.database import MemoryDB, SQLiteDB
 from services.pdv_service import PdvService
+from services.user_service import UserService, CredenciaisInvalidas, PermissaoNegada, UserError
+
+
+class LoginDialog:
+    def __init__(self, master: tk.Misc, user_service: UserService):
+        self.user_service = user_service
+        self.usuario_autenticado: User | None = None
+        self.janela = tk.Toplevel(master)
+        self.janela.title("Login")
+        self.janela.transient(master)
+        self.janela.grab_set()
+
+        tk.Label(self.janela, text="Usuário").grid(row=0, column=0, sticky="w", padx=8, pady=(8, 2))
+        tk.Label(self.janela, text="Senha").grid(row=1, column=0, sticky="w", padx=8, pady=2)
+
+        self.usuario_entry = tk.Entry(self.janela)
+        self.usuario_entry.grid(row=0, column=1, padx=8, pady=(8, 2))
+        self.senha_entry = tk.Entry(self.janela, show="*")
+        self.senha_entry.grid(row=1, column=1, padx=8, pady=2)
+
+        botoes = tk.Frame(self.janela)
+        botoes.grid(row=2, column=0, columnspan=2, pady=8)
+        tk.Button(botoes, text="Entrar", command=self._entrar).pack(side=tk.LEFT, padx=4)
+        tk.Button(botoes, text="Sair", command=self.janela.destroy).pack(side=tk.LEFT, padx=4)
+
+        dica = tk.Label(
+            self.janela,
+            text="Use admin/admin no primeiro acesso (troque ou crie usuários depois)",
+            fg="gray",
+        )
+        dica.grid(row=3, column=0, columnspan=2, padx=8, pady=(0, 8))
+
+        self.janela.bind("<Return>", lambda _e: self._entrar())
+        self.usuario_entry.focus_set()
+
+    def _entrar(self) -> None:
+        usuario = self.usuario_entry.get().strip()
+        senha = self.senha_entry.get()
+        try:
+            self.usuario_autenticado = self.user_service.autenticar(usuario, senha)
+        except CredenciaisInvalidas as exc:
+            messagebox.showerror("Login", str(exc))
+            return
+        self.janela.destroy()
 
 class MainMenu:
     """Menu principal com atalhos para módulos do sistema."""
@@ -34,8 +86,13 @@ class MainMenu:
         self.db = SQLiteDB()
         if not self.db.produtos:
             self.db.carregar_dados_demo()
-        self.service = PdvService(self.db)
-        self.caixa_service = CaixaService(self.db)
+        self.user_service = UserService(self.db)
+        self.current_user = self._realizar_login()
+        if not self.current_user:
+            master.destroy()
+            return
+        self.service = PdvService(self.db, usuario=self.current_user.username)
+        self.caixa_service = CaixaService(self.db, usuario=self.current_user.username)
 
         self._construir_layout()
 
@@ -46,13 +103,24 @@ class MainMenu:
         descricao = tk.Label(
             self.master,
             text=(
-                "Escolha um módulo. O PDV usa as mesmas tabelas em memória (produtos,"
-                " mesas, comandas, caixa, perdas)."
+                f"Logado como {self.current_user.username}"
+                f" ({'admin' if self.current_user.role == UserRole.ADMIN else 'operador'})"
             ),
             wraplength=420,
             justify="center",
         )
-        descricao.pack(padx=12, pady=(0, 12))
+        descricao.pack(padx=12, pady=(0, 6))
+
+        aviso = tk.Label(
+            self.master,
+            text=(
+                "Escolha um módulo. O PDV usa as mesmas tabelas em memória (produtos,"
+                " mesas, comandas, caixa, perdas). Usuários são persistidos no SQLite."
+            ),
+            wraplength=420,
+            justify="center",
+        )
+        aviso.pack(padx=12, pady=(0, 12))
 
         botoes_frame = tk.Frame(self.master)
         botoes_frame.pack(pady=8)
@@ -65,8 +133,12 @@ class MainMenu:
         tk.Button(botoes_frame, text="Cadastro de Produtos", width=20, command=self._abrir_cadastro).grid(
             row=1, column=1, padx=6, pady=6
         )
+        tk.Button(botoes_frame, text="Usuários (admin)", width=20, command=self._abrir_usuarios).grid(
+            row=2, column=0, padx=6, pady=6
+        )
 
     def _abrir_pdv(self) -> None:
+        self.service.usuario = self.current_user.username
         janela = tk.Toplevel(self.master)
         janela.title("PDV")
         try:
@@ -89,6 +161,7 @@ class MainMenu:
         RelatoriosWindow(janela, self.service, self.caixa_service)
 
     def _abrir_caixa(self) -> None:
+        self.caixa_service.usuario = self.current_user.username
         janela = tk.Toplevel(self.master)
         janela.title("Controle de Caixa")
         CaixaControleWindow(janela, self.caixa_service)
@@ -97,6 +170,19 @@ class MainMenu:
         janela = tk.Toplevel(self.master)
         janela.title("Cadastro de Produtos")
         CadastroProdutos(janela, self.db)
+
+    def _abrir_usuarios(self) -> None:
+        if self.current_user.role != UserRole.ADMIN:
+            messagebox.showerror("Permissão", "Apenas administradores podem gerenciar usuários.")
+            return
+        janela = tk.Toplevel(self.master)
+        janela.title("Usuários")
+        UsuariosWindow(janela, self.user_service, self.current_user)
+
+    def _realizar_login(self) -> User | None:
+        dialogo = LoginDialog(self.master, self.user_service)
+        self.master.wait_window(dialogo.janela)
+        return dialogo.usuario_autenticado
 
 
 class CadastroProdutos:
@@ -255,6 +341,60 @@ class CadastroProdutos:
     def _proximo_codigo(self) -> str:
         return str(self.db.next_id())
 
+
+class UsuariosWindow:
+    """Permite ao administrador criar novos usuários."""
+
+    def __init__(self, master: tk.Toplevel, user_service: UserService, ator: User):
+        self.master = master
+        self.user_service = user_service
+        self.ator = ator
+
+        self._construir_layout()
+        self._popular_lista()
+
+    def _construir_layout(self) -> None:
+        form = tk.Frame(self.master)
+        form.pack(padx=12, pady=10, fill="x")
+
+        tk.Label(form, text="Usuário").grid(row=0, column=0, sticky="w")
+        self.usuario_entry = tk.Entry(form, width=20)
+        self.usuario_entry.grid(row=1, column=0, padx=(0, 8))
+
+        tk.Label(form, text="Senha").grid(row=0, column=1, sticky="w")
+        self.senha_entry = tk.Entry(form, show="*", width=20)
+        self.senha_entry.grid(row=1, column=1, padx=(0, 8))
+
+        self.admin_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(form, text="Administrador", variable=self.admin_var).grid(row=1, column=2)
+
+        tk.Button(form, text="Criar", command=self._criar).grid(row=1, column=3, padx=(8, 0))
+
+        self.lista = tk.Listbox(self.master, width=60)
+        self.lista.pack(padx=12, pady=(6, 10))
+
+    def _popular_lista(self) -> None:
+        self.lista.delete(0, tk.END)
+
+        for usuario in sorted(self.user_service.listar(), key=lambda u: u.username):
+            tipo = "admin" if usuario.role == UserRole.ADMIN else "operador"
+            self.lista.insert(tk.END, f"{usuario.username} ({tipo})")
+
+    def _criar(self) -> None:
+        username = self.usuario_entry.get().strip()
+        senha = self.senha_entry.get()
+        if not username or not senha:
+            messagebox.showwarning("Campos obrigatórios", "Informe usuário e senha.")
+            return
+        try:
+            self.user_service.criar_usuario(self.ator, username, senha, self.admin_var.get())
+        except (UserError, PermissaoNegada) as exc:
+            messagebox.showerror("Usuários", str(exc))
+            return
+        self.usuario_entry.delete(0, tk.END)
+        self.senha_entry.delete(0, tk.END)
+        self.admin_var.set(False)
+        self._popular_lista()
 
 class RelatoriosWindow:
     """Relatórios simples de vendas, descontos, perdas e caixa."""

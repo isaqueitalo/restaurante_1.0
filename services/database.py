@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import hashlib
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
+from models.enums import UserRole
 
 from models import (
     Caixa,
@@ -28,6 +30,7 @@ from models import (
     StatusCaixa,
     StatusComanda,
     TipoMovimento,
+    User,
 )
 
 
@@ -44,8 +47,10 @@ class MemoryDB:
         self.caixas: List[Caixa] = []
         self.movimentos_caixa: List[MovimentoCaixa] = []
         self.logs: List[LogEntry] = []
+        self.users: Dict[str, User] = {}
 
         self._seq = 1
+        self._garantir_admin_padrao()
 
     def next_id(self) -> int:
         atual = self._seq
@@ -92,6 +97,17 @@ class MemoryDB:
             ]
         )
 
+    # Usuários --------------------------------------------------------
+    def _garantir_admin_padrao(self) -> None:
+        if self.users:
+            return
+        admin = User(id=self.next_id(), username="admin", password_hash=self._hash_password("admin"), role=UserRole.ADMIN)
+        self.users[admin.username] = admin
+
+    @staticmethod
+    def _hash_password(senha: str) -> str:
+        return hashlib.sha256(senha.encode("utf-8")).hexdigest()
+
 
 class SQLiteDB(MemoryDB):
     """Versão do repositório que salva os dados em disco via SQLite."""
@@ -123,6 +139,12 @@ class SQLiteDB(MemoryDB):
                     preco REAL,
                     por_quilo INTEGER,
                     estoque REAL
+                );
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY,
+                    username TEXT UNIQUE,
+                    password_hash TEXT,
+                    role TEXT
                 );
                 CREATE TABLE IF NOT EXISTS motivos_desconto (
                     id INTEGER PRIMARY KEY,
@@ -218,6 +240,16 @@ class SQLiteDB(MemoryDB):
         with self._connect() as conn:
             seq_row = conn.execute("SELECT valor FROM metadata WHERE chave='seq'").fetchone()
             self._seq = int(seq_row["valor"]) if seq_row else 1
+
+            self.users = {
+                row["username"]: User(
+                    id=row["id"],
+                    username=row["username"],
+                    password_hash=row["password_hash"],
+                    role=UserRole(row["role"]),
+                )
+                for row in conn.execute("SELECT * FROM users")
+            }
 
             self.produtos = {
                 row["codigo"]: Produto(
@@ -331,7 +363,13 @@ class SQLiteDB(MemoryDB):
             # se não houver dados mínimos, carregar demo
             if not self.produtos:
                 self.carregar_dados_demo()
-                self.persist()
+
+            # garante usuário admin padrão e salva qualquer seed inicial
+            if not self.users:
+                self._garantir_admin_padrao()
+
+            # grava o estado atual (incluindo seeds) para evitar falhas de indentação
+            self.persist()
 
     def _encode_datetime(self, value: Optional[datetime]) -> Optional[str]:
         return value.isoformat() if value else None
@@ -340,6 +378,12 @@ class SQLiteDB(MemoryDB):
         with self._connect() as conn:
             conn.execute("DELETE FROM metadata")
             conn.execute("INSERT INTO metadata (chave, valor) VALUES ('seq', ?)", (self._seq,))
+
+            conn.execute("DELETE FROM users")
+            conn.executemany(
+                "INSERT INTO users (id, username, password_hash, role) VALUES (?, ?, ?, ?)",
+                [(u.id, u.username, u.password_hash, u.role.value) for u in self.users.values()],
+            )
 
             conn.execute("DELETE FROM produtos")
             conn.executemany(
@@ -482,3 +526,4 @@ class SQLiteDB(MemoryDB):
                     for l in self.logs
                 ],
             )
+

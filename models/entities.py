@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Optional
+from models.enums import UserRole
 
 
 class StatusComanda(str, Enum):
@@ -24,6 +25,14 @@ class Produto:
     preco: float
     por_quilo: bool = False
     estoque: float = 0.0
+
+
+@dataclass
+class User:
+    id: int
+    username: str
+    password_hash: str
+    role: UserRole = UserRole.USER
 
 
 @dataclass
